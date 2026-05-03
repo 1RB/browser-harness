@@ -513,6 +513,77 @@ def _chrome_running():
         return False
 
 
+def launch_chrome(port=9222, headless=False):
+    """Launch Chrome with remote debugging, bypassing Chrome 147+ default-profile block.
+
+    Chrome 147+ branded builds silently disable --remote-debugging-port when the
+    default user-data directory is used (IsUsingDefaultDataDirectory() check).
+    We launch on a persistent non-default profile so the "Allow remote debugging?"
+    dialog never appears — critical for headless agents on Wayland.
+
+    Returns the WebSocket debugger URL (ws://...).
+    Raises RuntimeError if Chrome is not found or DevTools does not come up.
+    """
+    import platform, subprocess, time, json, urllib.request
+    system = platform.system()
+
+    # Resolve Chrome binary
+    chrome = None
+    if system == "Darwin":
+        p = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        chrome = str(p) if p.is_file() else shutil.which("Google Chrome")
+    elif system == "Windows":
+        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        p = Path(prog) / "Google/Chrome/Application/chrome.exe"
+        chrome = str(p) if p.is_file() else shutil.which("chrome")
+    else:
+        for name in ("google-chrome", "chromium-browser", "chromium"):
+            chrome = shutil.which(name)
+            if chrome:
+                break
+    if not chrome:
+        raise RuntimeError("Chrome not found. Install Google Chrome/Chromium or set BU_CDP_WS.")
+
+    # Persistent non-default profile directory
+    if system == "Linux":
+        config_home = Path.home() / ".local/share/browser-harness/chrome-config-home"
+        config_home.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "CHROME_CONFIG_HOME": str(config_home)}
+        udir = Path.home() / ".config/google-chrome"
+    elif system == "Darwin":
+        udir = Path.home() / "Library/Application Support/browser-harness/Chrome"
+        udir.mkdir(parents=True, exist_ok=True)
+        env = os.environ
+    else:
+        udir = Path.home() / "AppData/Local/browser-harness/Chrome"
+        udir.mkdir(parents=True, exist_ok=True)
+        env = os.environ
+
+    cmd = [chrome, f"--remote-debugging-port={port}", "--no-first-run", f"--user-data-dir={udir}"]
+    if headless:
+        cmd.append("--headless=new")
+    if system == "Linux" and (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"):
+        cmd.append("--ozone-platform=wayland")
+
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    # Wait for DevToolsActivePort
+    port_file = udir / "DevToolsActivePort"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if port_file.exists():
+            try:
+                lines = port_file.read_text().strip().splitlines()
+                if len(lines) >= 2:
+                    return f"ws://127.0.0.1:{lines[0]}{lines[1]}"
+            except Exception:
+                pass
+        if proc.poll() is not None:
+            raise RuntimeError(f"Chrome exited with code {proc.returncode}")
+        time.sleep(0.5)
+    raise RuntimeError("Timed out waiting for Chrome DevTools")
+
+
 def _open_chrome_inspect():
     """Open chrome://inspect/#remote-debugging so the user can tick the checkbox."""
     import platform, subprocess, webbrowser

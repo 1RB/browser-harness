@@ -12,6 +12,7 @@ from .admin import (
     NAME,
     daemon_alive,
     ensure_daemon,
+    launch_chrome,
     list_cloud_profiles,
     list_local_profiles,
     print_update_banner,
@@ -52,6 +53,9 @@ def _local_chrome_listening():
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.3).close()
             return True
+        except urllib.error.HTTPError:
+            # Chrome 147+ default profile returns 404 but is still live (#265).
+            return True
         except OSError: pass
     return False
 
@@ -91,6 +95,12 @@ def main():
         and os.environ.get("BU_AUTOSPAWN")
     ):
         start_remote_daemon(NAME)
+    if not daemon_alive() and not _local_chrome_listening():
+        # Cold-start local Chrome for agents (headless servers, CI, etc.).
+        # Chrome 147+ blocks remote-debugging on the default profile; we launch
+        # on a persistent non-default profile so the "Allow" dialog never appears.
+        ws_url = launch_chrome()
+        os.environ["BU_CDP_WS"] = ws_url
     ensure_daemon()
     exec(args[1], globals())
 
